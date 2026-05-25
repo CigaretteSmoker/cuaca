@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <title>Radar Vektor Jombang - Translator Kontekstual</title>
+    <style>
+        body { margin: 0; background-color: #0b0f19; color: #fff; font-family: sans-serif; display: flex; flex-direction: column; align-items: center; }
+        h1 { margin-top: 20px; font-size: 22px; color: #00ff88; }
+        canvas { border: 2px solid #1e293b; border-radius: 12px; background-color: #0f172a; }
+        #status-panel { margin: 15px; padding: 12px 20px; background: #1e293b; border-radius: 8px; width: 760px; font-size: 13px; line-height: 1.6; }
+        .data-riil { color: #38bdf8; font-family: monospace; font-weight: bold; }
+    </style>
+</head>
+<body>
+
+    <h1>Radar Vektor Jombang (Terjemahan Data Aktual)</h1>
+    
+    <div id="status-panel">
+        <div id="loading-status" style="color: #00ff88; font-weight: bold;">🟢 INTERPOLASI SISTEM AKTIF</div>
+        <div id="data-display">Membaca data atmosfer...</div>
+    </div>
+    
+    <canvas id="canvasJombang" width="800" height="700"></canvas>
+
+    <script>
+        const canvas = document.getElementById('canvasJombang');
+        const ctx = canvas.getContext('2d');
+
+        const PI_55 = 3.1415926535897932384626433832795028841971693993751058209;
+        const Ku = 1.25; 
+        
+        let satelitMakro = {
+            kelembapan: 75,
+            angin: 12,
+            P: 1010,
+            deltaT: 8,
+            m: 6000000,
+            kecepatanAnginAnimasi: 0.004
+        };
+        
+        let animasiT = 0; 
+
+        const batasVektorJombang = [
+            { x: 200, y: 120 }, { x: 450, y: 80 }, { x: 680, y: 110 }, 
+            { x: 720, y: 230 }, { x: 680, y: 400 }, { x: 730, y: 620 }, 
+            { x: 550, y: 660 }, { x: 380, y: 650 }, { x: 220, y: 560 }, 
+            { x: 100, y: 450 }, { x: 180, y: 300 }, { x: 150, y: 180 }
+        ];
+
+        const kecamatanJombang = [
+            { nama: "Plandaan", x: 220, y: 180, tipe: "Utara", bLembap: 0.90, bAngin: 1.15 },
+            { nama: "Ploso", x: 380, y: 190, tipe: "Utara", bLembap: 0.88, bAngin: 1.25 },
+            { nama: "Kudu", x: 550, y: 170, tipe: "Utara", bLembap: 0.91, bAngin: 1.10 },
+            { nama: "Kabuh", x: 450, y: 120, tipe: "Utara", bLembap: 0.85, bAngin: 1.30 },
+            { nama: "Ngusikan", x: 650, y: 130, tipe: "Utara", bLembap: 0.89, bAngin: 1.20 },
+            { nama: "Tembelang", x: 390, y: 290, tipe: "Tengah", bLembap: 0.98, bAngin: 1.00 },
+            { nama: "Megaluh", x: 250, y: 300, tipe: "Tengah", bLembap: 0.97, bAngin: 1.05 },
+            { nama: "Jombang Kota", x: 410, y: 390, tipe: "Tengah", bLembap: 1.00, bAngin: 0.95 },
+            { nama: "Peterongan", x: 510, y: 380, tipe: "Tengah", bLembap: 1.01, bAngin: 0.95 },
+            { nama: "Kesamben", x: 650, y: 250, tipe: "Tengah", bLembap: 0.95, bAngin: 1.05 },
+            { nama: "Sumobito", x: 660, y: 350, tipe: "Tengah", bLembap: 0.99, bAngin: 1.00 },
+            { nama: "Jogoroto", x: 490, y: 460, tipe: "Tengah", bLembap: 1.02, bAngin: 0.90 },
+            { nama: "Perak", x: 240, y: 450, tipe: "Tengah", bLembap: 0.96, bAngin: 1.00 },
+            { nama: "Bandarkedungmulyo", x: 140, y: 440, tipe: "Tengah", bLembap: 0.95, bAngin: 1.10 },
+            { nama: "Gudo", x: 250, y: 550, tipe: "Selatan", bLembap: 1.05, bAngin: 0.90 },
+            { nama: "Diwek", x: 380, y: 490, tipe: "Selatan", bLembap: 1.04, bAngin: 0.85 },
+            { nama: "Mojoagung", x: 630, y: 460, tipe: "Selatan", bLembap: 1.08, bAngin: 0.95 },
+            { nama: "Mojowarno", x: 550, y: 540, tipe: "Selatan", bLembap: 1.10, bAngin: 0.80 },
+            { nama: "Bareng", x: 560, y: 610, tipe: "Selatan", bLembap: 1.15, bAngin: 0.75 },
+            { nama: "Wonosalam", x: 680, y: 610, tipe: "Selatan", bLembap: 1.25, bAngin: 0.70 }, 
+            { nama: "Ngoro", x: 410, y: 600, tipe: "Selatan", bLembap: 1.06, bAngin: 0.85 }
+        ];
+
+        // ENGINE 1: INTERPRETER ARTI LOGIKA DATA
+        function dapatkanArtiKelembapan(persen) {
+            if (persen >= 85) return "Hujan";
+            if (persen >= 70) return "Mendung";
+            if (persen >= 55) return "Berawan";
+            return "Cerah";
+        }
+
+        function dapatkanArtiAngin(kecepatan) {
+            if (kecepatan >= 20) return "Kencang";
+            if (kecepatan >= 10) return "Sedang";
+            return "Tenang";
+        }
+
+        async function sinkronisasiSatelit() {
+            try {
+                const respon = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=-7.5568&longitude=112.2331&current=temperature_2m,relative_humidity_2m,surface_pressure,wind_speed_10m,weather_code`);
+                if (!respon.ok) throw new Error();
+                const data = await respon.json();
+                
+                satelitMakro.P = data.current.surface_pressure; 
+                satelitMakro.kelembapan = data.current.relative_humidity_2m;
+                satelitMakro.angin = data.current.wind_speed_10m;
+                satelitMakro.m = satelitMakro.kelembapan * 95000; 
+                satelitMakro.deltaT = Math.max(4, data.current.temperature_2m - (data.current.temperature_2m - ((100 - satelitMakro.kelembapan) / 5)));
+                satelitMakro.kecepatanAnginAnimasi = Math.min(0.012, Math.max(0.002, satelitMakro.angin * 0.0005));
+
+                document.getElementById('data-display').innerHTML = `Satelit Makro -> Kelembapan Jombang: <span class="data-riil">${satelitMakro.kelembapan}%</span> | Angin: <span class="data-riil">${satelitMakro.angin} km/jam</span>`;
+            } catch (error) {
+                document.getElementById('data-display').innerText = `Koneksi Timeout. Menggunakan Estimasi Logika Lokal.`;
+            }
+        }
+
+        function getKebisinganFraktal(x, y) {
+            let v = 0;
+            const skalaKerapatan = (satelitMakro.m / 10000000) * PI_55;
+            const f1 = 0.002 * skalaKerapatan;
+            const f2 = 0.005 * skalaKerapatan;
+            v += Math.sin(x * f1 + animasiT) * Math.cos(y * f1 + animasiT);
+            v += Math.sin(x * f2 - animasiT) * Math.cos(y * f2 + animasiT) * 0.5;
+            return (v + 1.5) / 3; 
+        }
+
+        function renderPeta() {
+            ctx.fillStyle = "#090d16";
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            // Batas Teritorial Vektor
+            ctx.beginPath();
+            ctx.moveTo(batasVektorJombang[0].x, batasVektorJombang[0].y);
+            for (let i = 1; i < batasVektorJombang.length; i++) {
+                ctx.lineTo(batasVektorJombang[i].x, batasVektorJombang[i].y);
+            }
+            ctx.closePath();
+            ctx.fillStyle = "#111827"; ctx.fill();
+            ctx.strokeStyle = "#1e293b"; ctx.lineWidth = 3; ctx.stroke();
+
+            // Clipping Pemetaan Radar
+            ctx.save(); 
+            ctx.beginPath();
+            ctx.moveTo(batasVektorJombang[0].x, batasVektorJombang[0].y);
+            for (let i = 1; i < batasVektorJombang.length; i++) {
+                ctx.lineTo(batasVektorJombang[i].x, batasVektorJombang[i].y);
+            }
+            ctx.closePath(); ctx.clip(); 
+
+            const grid = 5;
+            const m_deltaT = satelitMakro.m * satelitMakro.deltaT;
+            const P = satelitMakro.P;
+
+            for (let y = 0; y < canvas.height; y += grid) {
+                for (let x = 0; x < canvas.width; x += grid) {
+                    const noise = getKebisinganFraktal(x, y);
+                    const A_efektif = 2500 * (1.5 - noise); 
+                    const intensitasHujan = Ku * (m_deltaT / (P * A_efektif));
+
+                    if (intensitasHujan > 1.4) {
+                        ctx.fillStyle = "rgba(0, 150, 255, 0.35)"; ctx.fillRect(x, y, grid, grid);
+                    } else if (intensitasHujan > 0.95) {
+                        ctx.fillStyle = "rgba(0, 255, 136, 0.15)"; ctx.fillRect(x, y, grid, grid);
+                    }
+                }
+            }
+            ctx.restore(); 
+
+            // RENDERING TEXT TELEMETRI + TRANSLATION NYATA
+            kecamatanJombang.forEach(kec => {
+                const kelembapanKecamatan = Math.min(100, Math.round(satelitMakro.kelembapan * kec.bLembap));
+                const anginKecamatan = parseFloat((satelitMakro.angin * kec.bAngin).toFixed(1));
+
+                // Konversi angka ke teks deskriptif melalui Fungsi Klasifikasi
+                const artiLembap = dapatkanArtiKelembapan(kelembapanKecamatan);
+                const artiAngin = dapatkanArtiAngin(anginKecamatan);
+
+                // Menggambar Node Titik Kecamatan
+                ctx.beginPath();
+                ctx.arc(kec.x, kec.y, 4, 0, 2 * PI_55);
+                ctx.fillStyle = kec.tipe === "Utara" ? "#f59e0b" : kec.tipe === "Selatan" ? "#ef4444" : "#38bdf8";
+                ctx.fill();
+
+                // Layer Teks 1: Nama Kecamatan (Bold Putih)
+                ctx.fillStyle = "#ffffff";
+                ctx.font = "bold 10px sans-serif";
+                ctx.textAlign = "center";
+                ctx.fillText(kec.nama, kec.x, kec.y - 26);
+
+                // Layer Teks 2: Angka + Arti Kelembapan
+                ctx.fillStyle = "#a7f3d0"; // Hijau Mint untuk status cuaca
+                ctx.font = "9px monospace";
+                ctx.fillText(`H: ${kelembapanKecamatan}% (${artiLembap})`, kec.x, kec.y - 14);
+
+                // Layer Teks 3: Angka + Arti Angin
+                ctx.fillStyle = "#bae6fd"; // Biru Langit untuk status angin
+                ctx.font = "9px monospace";
+                ctx.fillText(`W: ${anginKecamatan}k (${artiAngin})`, kec.x, kec.y - 4);
+            });
+
+            animasiT += satelitMakro.kecepatanAnginAnimasi; 
+            requestAnimationFrame(renderPeta);
+        }
+
+        sinkronisasiSatelit();
+        setInterval(sinkronisasiSatelit, 600000);
+        renderPeta();
+    </script>
+</body>
+</html>
