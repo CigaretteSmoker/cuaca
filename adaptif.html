@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+    <title>Radar Vektor Jombang</title>
+    <style>
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+        :root {
+            --bg-deep:    #070b14;
+            --bg-panel:   #0f172a;
+            --bg-card:    #1e293b;
+            --accent-green: #00ff88;
+            --accent-blue:  #38bdf8;
+            --accent-amber: #f59e0b;
+            --accent-red:   #ef4444;
+            --text-main:  #e2e8f0;
+            --text-muted: #64748b;
+            --border:     #1e293b;
+        }
+
+        html, body {
+            width: 100%; height: 100%;
+            background: var(--bg-deep);
+            color: var(--text-main);
+            font-family: 'Courier New', Courier, monospace;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+        }
+
+        h1 {
+            margin: 16px 0 8px;
+            font-size: clamp(14px, 2.5vw, 20px);
+            color: var(--accent-green);
+            letter-spacing: 0.08em;
+            text-align: center;
+            text-shadow: 0 0 12px rgba(0,255,136,0.4);
+        }
+
+        #status-panel {
+            margin: 0 auto 12px;
+            padding: 10px 16px;
+            background: var(--bg-card);
+            border-radius: 8px;
+            border: 1px solid var(--border);
+            width: min(760px, 96vw);
+            font-size: clamp(10px, 1.5vw, 13px);
+            line-height: 1.7;
+        }
+
+        #loading-status { color: var(--accent-green); font-weight: bold; }
+        .data-riil { color: var(--accent-blue); font-weight: bold; }
+
+        .canvas-wrapper {
+            width: min(800px, 98vw);
+            aspect-ratio: 800 / 700;
+            position: relative;
+        }
+
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+            border: 2px solid var(--border);
+            border-radius: 12px;
+            background: var(--bg-panel);
+            /* hardware acceleration hints */
+            -webkit-transform: translateZ(0);
+            transform: translateZ(0);
+            will-change: transform;
+        }
+
+        /* Legend */
+        #legend {
+            display: flex;
+            gap: 16px;
+            flex-wrap: wrap;
+            justify-content: center;
+            margin: 10px 0 16px;
+            font-size: clamp(9px, 1.3vw, 11px);
+            color: var(--text-muted);
+        }
+        .legend-item { display: flex; align-items: center; gap: 5px; }
+        .dot {
+            width: 8px; height: 8px;
+            border-radius: 50%;
+            display: inline-block;
+            flex-shrink: 0;
+        }
+    </style>
+</head>
+<body>
+
+<h1>⬡ RADAR VEKTOR JOMBANG — TERJEMAHAN DATA AKTUAL</h1>
+
+<div id="status-panel">
+    <div id="loading-status">🟢 INTERPOLASI SISTEM AKTIF</div>
+    <div id="data-display">Membaca data atmosfer...</div>
+</div>
+
+<div class="canvas-wrapper">
+    <canvas id="canvasJombang" width="800" height="700"></canvas>
+</div>
+
+<div id="legend">
+    <div class="legend-item"><span class="dot" style="background:#f59e0b"></span> Kec. Utara</div>
+    <div class="legend-item"><span class="dot" style="background:#38bdf8"></span> Kec. Tengah</div>
+    <div class="legend-item"><span class="dot" style="background:#ef4444"></span> Kec. Selatan</div>
+    <div class="legend-item"><span class="dot" style="background:rgba(0,150,255,0.7)"></span> Intensitas Hujan Tinggi</div>
+    <div class="legend-item"><span class="dot" style="background:rgba(0,255,136,0.5)"></span> Intensitas Mendung</div>
+</div>
+
+<script>
+(function () {
+    'use strict';
+
+    /* ── KONSTANTA ─────────────────────────────────────────────────── */
+    var PI_55 = 3.1415926535897932384626433832795028841971693993751058209;
+    var Ku    = 1.25;
+    var TAU   = PI_55 * 2;
+
+    /* ── CANVAS SETUP ───────────────────────────────────────────────── */
+    var canvas = document.getElementById('canvasJombang');
+    var ctx    = canvas.getContext('2d');
+
+    /* Pixel Ratio untuk display Retina / HiDPI */
+    var dpr = (window.devicePixelRatio || 1);
+    var LOGICAL_W = 800, LOGICAL_H = 700;
+    canvas.width  = LOGICAL_W * dpr;
+    canvas.height = LOGICAL_H * dpr;
+    canvas.style.width  = '100%';
+    canvas.style.height = '100%';
+    ctx.scale(dpr, dpr);
+
+    /* ── STATE ──────────────────────────────────────────────────────── */
+    var satelit = {
+        kelembapan: 75,
+        angin: 12,
+        P: 1010,
+        deltaT: 8,
+        m: 6000000,
+        kecAnim: 0.004
+    };
+    var animasiT = 0;
+    var frameId  = null;
+    var offscreen = null;   // offscreen canvas untuk grid statis
+
+    /* ── BATAS WILAYAH ─────────────────────────────────────────────── */
+    var batas = [
+        {x:200,y:120},{x:450,y:80},{x:680,y:110},
+        {x:720,y:230},{x:680,y:400},{x:730,y:620},
+        {x:550,y:660},{x:380,y:650},{x:220,y:560},
+        {x:100,y:450},{x:180,y:300},{x:150,y:180}
+    ];
+
+    /* ── KECAMATAN ─────────────────────────────────────────────────── */
+    var kecamatan = [
+        {nama:"Plandaan",        x:220,y:180,tipe:"Utara",   bL:0.90,bA:1.15},
+        {nama:"Ploso",           x:380,y:190,tipe:"Utara",   bL:0.88,bA:1.25},
+        {nama:"Kudu",            x:550,y:170,tipe:"Utara",   bL:0.91,bA:1.10},
+        {nama:"Kabuh",           x:450,y:120,tipe:"Utara",   bL:0.85,bA:1.30},
+        {nama:"Ngusikan",        x:650,y:130,tipe:"Utara",   bL:0.89,bA:1.20},
+        {nama:"Tembelang",       x:390,y:290,tipe:"Tengah",  bL:0.98,bA:1.00},
+        {nama:"Megaluh",         x:250,y:300,tipe:"Tengah",  bL:0.97,bA:1.05},
+        {nama:"Jombang Kota",    x:410,y:390,tipe:"Tengah",  bL:1.00,bA:0.95},
+        {nama:"Peterongan",      x:510,y:380,tipe:"Tengah",  bL:1.01,bA:0.95},
+        {nama:"Kesamben",        x:650,y:250,tipe:"Tengah",  bL:0.95,bA:1.05},
+        {nama:"Sumobito",        x:660,y:350,tipe:"Tengah",  bL:0.99,bA:1.00},
+        {nama:"Jogoroto",        x:490,y:460,tipe:"Tengah",  bL:1.02,bA:0.90},
+        {nama:"Perak",           x:240,y:450,tipe:"Tengah",  bL:0.96,bA:1.00},
+        {nama:"Bandarkedungmulyo",x:140,y:440,tipe:"Tengah", bL:0.95,bA:1.10},
+        {nama:"Gudo",            x:250,y:550,tipe:"Selatan", bL:1.05,bA:0.90},
+        {nama:"Diwek",           x:380,y:490,tipe:"Selatan", bL:1.04,bA:0.85},
+        {nama:"Mojoagung",       x:630,y:460,tipe:"Selatan", bL:1.08,bA:0.95},
+        {nama:"Mojowarno",       x:550,y:540,tipe:"Selatan", bL:1.10,bA:0.80},
+        {nama:"Bareng",          x:560,y:610,tipe:"Selatan", bL:1.15,bA:0.75},
+        {nama:"Wonosalam",       x:680,y:610,tipe:"Selatan", bL:1.25,bA:0.70},
+        {nama:"Ngoro",           x:410,y:600,tipe:"Selatan", bL:1.06,bA:0.85}
+    ];
+
+    /* ── HELPER: KLASIFIKASI ───────────────────────────────────────── */
+    function artiLembap(p) {
+        return p >= 85 ? 'Hujan' : p >= 70 ? 'Mendung' : p >= 55 ? 'Berawan' : 'Cerah';
+    }
+    function artiAngin(v) {
+        return v >= 20 ? 'Kencang' : v >= 10 ? 'Sedang' : 'Tenang';
+    }
+
+    /* ── NOISE ─────────────────────────────────────────────────────── */
+    function noise(x, y) {
+        var skala = (satelit.m / 10000000) * PI_55;
+        var f1 = 0.002 * skala, f2 = 0.005 * skala;
+        var v  = Math.sin(x*f1 + animasiT) * Math.cos(y*f1 + animasiT);
+        v += Math.sin(x*f2 - animasiT) * Math.cos(y*f2 + animasiT) * 0.5;
+        return (v + 1.5) / 3;
+    }
+
+    /* ── PATH BATAS (reusable) ─────────────────────────────────────── */
+    function traceBatas() {
+        ctx.beginPath();
+        ctx.moveTo(batas[0].x, batas[0].y);
+        for (var i = 1; i < batas.length; i++) ctx.lineTo(batas[i].x, batas[i].y);
+        ctx.closePath();
+    }
+
+    /* ── OFFSCREEN: latar statis (border + fill wilayah) ──────────── */
+    function buildOffscreen() {
+        var oc  = document.createElement('canvas');
+        oc.width  = LOGICAL_W * dpr;
+        oc.height = LOGICAL_H * dpr;
+        var oc2 = oc.getContext('2d');
+        oc2.scale(dpr, dpr);
+
+        oc2.beginPath();
+        oc2.moveTo(batas[0].x, batas[0].y);
+        for (var i = 1; i < batas.length; i++) oc2.lineTo(batas[i].x, batas[i].y);
+        oc2.closePath();
+        oc2.fillStyle   = '#111827';
+        oc2.fill();
+        oc2.strokeStyle = '#1e293b';
+        oc2.lineWidth   = 3;
+        oc2.stroke();
+        return oc;
+    }
+
+    /* ── RENDER UTAMA ─────────────────────────────────────────────── */
+    function render() {
+        /* Background */
+        ctx.fillStyle = '#090d16';
+        ctx.fillRect(0, 0, LOGICAL_W, LOGICAL_H);
+
+        /* Blit offscreen statis */
+        ctx.drawImage(offscreen, 0, 0, LOGICAL_W, LOGICAL_H);
+
+        /* Grid radar — clipped ke batas wilayah */
+        ctx.save();
+        traceBatas();
+        ctx.clip();
+
+        var grid = 5;
+        var mdt  = satelit.m * satelit.deltaT;
+        var P    = satelit.P;
+
+        for (var y = 0; y < LOGICAL_H; y += grid) {
+            for (var x = 0; x < LOGICAL_W; x += grid) {
+                var n       = noise(x, y);
+                var aef     = 2500 * (1.5 - n);
+                var iHujan  = Ku * (mdt / (P * aef));
+
+                if (iHujan > 1.4) {
+                    ctx.fillStyle = 'rgba(0,150,255,0.35)';
+                    ctx.fillRect(x, y, grid, grid);
+                } else if (iHujan > 0.95) {
+                    ctx.fillStyle = 'rgba(0,255,136,0.15)';
+                    ctx.fillRect(x, y, grid, grid);
+                }
+            }
+        }
+        ctx.restore();
+
+        /* Node & Label Kecamatan */
+        for (var k = 0; k < kecamatan.length; k++) {
+            var kec   = kecamatan[k];
+            var lPct  = Math.min(100, Math.round(satelit.kelembapan * kec.bL));
+            var aKmh  = parseFloat((satelit.angin * kec.bA).toFixed(1));
+            var color = kec.tipe === 'Utara' ? '#f59e0b' : kec.tipe === 'Selatan' ? '#ef4444' : '#38bdf8';
+
+            /* Dot */
+            ctx.beginPath();
+            ctx.arc(kec.x, kec.y, 4, 0, TAU);
+            ctx.fillStyle = color;
+            ctx.fill();
+
+            /* Glow ring */
+            ctx.beginPath();
+            ctx.arc(kec.x, kec.y, 6, 0, TAU);
+            ctx.strokeStyle = color.replace(')', ',0.35)').replace('rgb(','rgba(').replace('#','rgba(').slice(0,-1) + ',0.35)';
+            // safe glow via shadowBlur:
+            ctx.shadowColor  = color;
+            ctx.shadowBlur   = 6;
+            ctx.strokeStyle  = color;
+            ctx.lineWidth    = 0.5;
+            ctx.stroke();
+            ctx.shadowBlur   = 0;
+
+            /* Teks */
+            ctx.textAlign = 'center';
+            ctx.fillStyle = '#ffffff';
+            ctx.font      = 'bold 10px monospace';
+            ctx.fillText(kec.nama, kec.x, kec.y - 26);
+
+            ctx.fillStyle = '#a7f3d0';
+            ctx.font      = '9px monospace';
+            ctx.fillText('H: ' + lPct + '% (' + artiLembap(lPct) + ')', kec.x, kec.y - 14);
+
+            ctx.fillStyle = '#bae6fd';
+            ctx.font      = '9px monospace';
+            ctx.fillText('W: ' + aKmh + 'k (' + artiAngin(aKmh) + ')', kec.x, kec.y - 4);
+        }
+
+        animasiT += satelit.kecAnim;
+        frameId = requestAnimationFrame(render);
+    }
+
+    /* ── FETCH API CUACA ──────────────────────────────────────────── */
+    function syncSatelit() {
+        var url = 'https://api.open-meteo.com/v1/forecast'
+                + '?latitude=-7.5568&longitude=112.2331'
+                + '&current=temperature_2m,relative_humidity_2m,surface_pressure,wind_speed_10m,weather_code';
+
+        var xhr = new XMLHttpRequest();
+        xhr.open('GET', url, true);
+        xhr.timeout = 10000;
+
+        xhr.onload = function () {
+            if (xhr.status >= 200 && xhr.status < 300) {
+                try {
+                    var data = JSON.parse(xhr.responseText);
+                    var c    = data.current;
+                    satelit.P          = c.surface_pressure;
+                    satelit.kelembapan = c.relative_humidity_2m;
+                    satelit.angin      = c.wind_speed_10m;
+                    satelit.m          = satelit.kelembapan * 95000;
+                    satelit.deltaT     = Math.max(4, c.temperature_2m - ((100 - satelit.kelembapan) / 5));
+                    satelit.kecAnim    = Math.min(0.012, Math.max(0.002, satelit.angin * 0.0005));
+
+                    document.getElementById('data-display').innerHTML =
+                        'Satelit Makro &rarr; Kelembapan: <span class="data-riil">' + satelit.kelembapan +
+                        '%</span> | Angin: <span class="data-riil">' + satelit.angin + ' km/jam</span>';
+
+                    /* Rebuild offscreen tidak diperlukan (hanya border) */
+                } catch (e) { onFail(); }
+            } else { onFail(); }
+        };
+        xhr.onerror   = onFail;
+        xhr.ontimeout = onFail;
+        xhr.send();
+    }
+
+    function onFail() {
+        document.getElementById('data-display').innerText =
+            'Koneksi Timeout. Menggunakan Estimasi Logika Lokal.';
+    }
+
+    /* ── VISIBILITY API: hentikan loop saat tab tersembunyi ───────── */
+    function handleVisibility() {
+        if (document.hidden) {
+            if (frameId) { cancelAnimationFrame(frameId); frameId = null; }
+        } else {
+            if (!frameId) frameId = requestAnimationFrame(render);
+        }
+    }
+
+    /* Polyfill vendor prefix untuk visibilitychange */
+    var visEvt = typeof document.hidden !== 'undefined'       ? 'visibilitychange'
+               : typeof document.webkitHidden !== 'undefined' ? 'webkitvisibilitychange'
+               : typeof document.msHidden !== 'undefined'     ? 'msvisibilitychange'
+               : null;
+    if (visEvt) document.addEventListener(visEvt, handleVisibility, false);
+
+    /* ── RESIZE: recalculate DPR jika window diperbesar ──────────── */
+    var resizeTimer = null;
+    window.addEventListener('resize', function () {
+        clearTimeout(resizeTimer);
+        resizeTimer = setTimeout(function () {
+            dpr = window.devicePixelRatio || 1;
+            canvas.width  = LOGICAL_W * dpr;
+            canvas.height = LOGICAL_H * dpr;
+            ctx.scale(dpr, dpr);
+            offscreen = buildOffscreen();
+        }, 200);
+    }, false);
+
+    /* ── INIT ─────────────────────────────────────────────────────── */
+    offscreen = buildOffscreen();
+    syncSatelit();
+    setInterval(syncSatelit, 600000);
+    render();
+
+})();
+</script>
+</body>
+</html>
