@@ -2,7 +2,7 @@
 <html lang="id">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Radar Vektor Jombang</title>
     <style>
         *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -43,13 +43,39 @@
             border: 1px solid rgba(56,189,248,0.3);
             vertical-align: middle;
         }
-        .canvas-wrapper { width: min(800px, 98vw); aspect-ratio: 800/700; }
-        canvas {
-            display: block; width: 100%; height: 100%;
-            border: 2px solid var(--border); border-radius: 10px;
+        .canvas-wrapper {
+            width: min(800px, 98vw);
+            aspect-ratio: 800/700;
+            position: relative;
+            overflow: hidden;
+            border: 2px solid var(--border);
+            border-radius: 10px;
             background: #090d16;
-            -webkit-transform: translateZ(0); transform: translateZ(0);
+            cursor: grab;
+            touch-action: none;
+        }
+        .canvas-wrapper.grabbing { cursor: grabbing; }
+        canvas {
+            display: block;
+            position: absolute; top: 0; left: 0;
+            width: 100%; height: 100%;
+            -webkit-transform-origin: 0 0; transform-origin: 0 0;
             will-change: transform;
+        }
+        #zoom-hint {
+            position: absolute; bottom: 8px; right: 10px;
+            font-size: 10px; color: rgba(100,116,139,0.7);
+            pointer-events: none; user-select: none;
+            font-family: 'Courier New', monospace;
+        }
+        #zoom-reset {
+            position: absolute; top: 8px; right: 10px;
+            padding: 3px 8px; font-size: 10px;
+            background: rgba(30,41,59,0.85); color: #38bdf8;
+            border: 1px solid rgba(56,189,248,0.3);
+            border-radius: 4px; cursor: pointer;
+            font-family: 'Courier New', monospace;
+            display: none;
         }
         #legend {
             display: flex; gap: 12px; flex-wrap: wrap;
@@ -66,8 +92,10 @@
     <div id="loading-status">🟢 INTERPOLASI SISTEM AKTIF <span id="mode-badge">DETEKSI...</span></div>
     <div id="data-display">Membaca data atmosfer...</div>
 </div>
-<div class="canvas-wrapper">
+<div class="canvas-wrapper" id="canvasWrapper">
     <canvas id="canvasJombang" width="800" height="700"></canvas>
+    <div id="zoom-hint">🔍 pinch / scroll untuk zoom</div>
+    <button id="zoom-reset">↺ Reset</button>
 </div>
 <div id="legend">
     <div class="li"><span class="dot" style="background:#f59e0b"></span>Kec. Utara</div>
@@ -447,6 +475,162 @@ setInterval(sync,600000);
 render();
 
 })();
+
+/* ════════════════════════════════════════════════════════════════════
+   ZOOM & PAN ENGINE
+   — Mouse: scroll-wheel zoom, drag to pan
+   — Touch: pinch-to-zoom + drag to pan
+   Transform diterapkan ke CSS canvas (bukan ctx.scale) sehingga
+   tidak mengganggu render pipeline sama sekali.
+   ════════════════════════════════════════════════════════════════════ */
+(function(){
+    var wrapper = document.getElementById('canvasWrapper');
+    var cv      = document.getElementById('canvasJombang');
+    var resetBtn= document.getElementById('zoom-reset');
+
+    var zScale  = 1;
+    var zX      = 0, zY = 0;        /* translate offset dalam px wrapper */
+    var MIN_Z   = 1, MAX_Z = 5;
+
+    function applyTransform(){
+        var t = 'translate(' + zX + 'px,' + zY + 'px) scale(' + zScale + ')';
+        cv.style.webkitTransform = t;
+        cv.style.transform = t;
+        resetBtn.style.display = (zScale > 1.01) ? 'block' : 'none';
+    }
+
+    /* Clamp translate agar canvas tidak keluar viewport wrapper */
+    function clampPan(){
+        var ww = wrapper.clientWidth;
+        var wh = wrapper.clientHeight;
+        var maxX = 0, minX = ww - ww * zScale;
+        var maxY = 0, minY = wh - wh * zScale;
+        zX = Math.min(maxX, Math.max(minX, zX));
+        zY = Math.min(maxY, Math.max(minY, zY));
+    }
+
+    /* Zoom toward focal point (cx,cy) dalam koordinat wrapper */
+    function zoomAt(cx, cy, factor){
+        var newZ = Math.min(MAX_Z, Math.max(MIN_Z, zScale * factor));
+        var ratio = newZ / zScale;
+        zX = cx - ratio * (cx - zX);
+        zY = cy - ratio * (cy - zY);
+        zScale = newZ;
+        clampPan();
+        applyTransform();
+    }
+
+    /* ── MOUSE: scroll wheel ──────────────────────────────────────── */
+    wrapper.addEventListener('wheel', function(e){
+        e.preventDefault();
+        var r   = wrapper.getBoundingClientRect();
+        var cx  = e.clientX - r.left;
+        var cy  = e.clientY - r.top;
+        var dir = e.deltaY < 0 ? 1.12 : (1/1.12);
+        zoomAt(cx, cy, dir);
+    }, {passive: false});
+
+    /* ── MOUSE: drag to pan ───────────────────────────────────────── */
+    var drag = false, dragX = 0, dragY = 0;
+    wrapper.addEventListener('mousedown', function(e){
+        if(zScale <= 1.01) return;
+        drag = true; dragX = e.clientX - zX; dragY = e.clientY - zY;
+        wrapper.classList.add('grabbing');
+    });
+    window.addEventListener('mousemove', function(e){
+        if(!drag) return;
+        zX = e.clientX - dragX; zY = e.clientY - dragY;
+        clampPan(); applyTransform();
+    });
+    window.addEventListener('mouseup', function(){
+        drag = false; wrapper.classList.remove('grabbing');
+    });
+
+    /* ── TOUCH: pinch-to-zoom + pan ──────────────────────────────── */
+    var lastDist = null, lastMidX = 0, lastMidY = 0;
+    var touchStartX = 0, touchStartY = 0;
+
+    function getTouchDist(t){
+        var dx = t[0].clientX - t[1].clientX;
+        var dy = t[0].clientY - t[1].clientY;
+        return Math.sqrt(dx*dx + dy*dy);
+    }
+    function getTouchMid(t, r){
+        return {
+            x: ((t[0].clientX + t[1].clientX) / 2) - r.left,
+            y: ((t[0].clientY + t[1].clientY) / 2) - r.top
+        };
+    }
+
+    wrapper.addEventListener('touchstart', function(e){
+        if(e.touches.length === 2){
+            e.preventDefault();
+            lastDist = getTouchDist(e.touches);
+            var r   = wrapper.getBoundingClientRect();
+            var mid = getTouchMid(e.touches, r);
+            lastMidX = mid.x; lastMidY = mid.y;
+        } else if(e.touches.length === 1 && zScale > 1.01){
+            touchStartX = e.touches[0].clientX - zX;
+            touchStartY = e.touches[0].clientY - zY;
+        }
+    }, {passive: false});
+
+    wrapper.addEventListener('touchmove', function(e){
+        e.preventDefault();
+        if(e.touches.length === 2){
+            var dist = getTouchDist(e.touches);
+            var r    = wrapper.getBoundingClientRect();
+            var mid  = getTouchMid(e.touches, r);
+            if(lastDist){
+                var factor = dist / lastDist;
+                /* juga handle pan saat pinch */
+                zX += mid.x - lastMidX;
+                zY += mid.y - lastMidY;
+                zoomAt(mid.x, mid.y, factor);
+            }
+            lastDist = dist; lastMidX = mid.x; lastMidY = mid.y;
+        } else if(e.touches.length === 1 && zScale > 1.01){
+            zX = e.touches[0].clientX - touchStartX;
+            zY = e.touches[0].clientY - touchStartY;
+            clampPan(); applyTransform();
+        }
+    }, {passive: false});
+
+    wrapper.addEventListener('touchend', function(e){
+        if(e.touches.length < 2) lastDist = null;
+    });
+
+    /* ── DOUBLE-TAP / DOUBLE-CLICK to zoom ───────────────────────── */
+    var lastTap = 0;
+    wrapper.addEventListener('touchend', function(e){
+        var now = Date.now();
+        if(now - lastTap < 300 && e.changedTouches.length === 1){
+            var r  = wrapper.getBoundingClientRect();
+            var cx = e.changedTouches[0].clientX - r.left;
+            var cy = e.changedTouches[0].clientY - r.top;
+            zoomAt(cx, cy, zScale > 1.5 ? 0 : 2); /* toggle 1× ↔ 2× */
+            if(zScale < MIN_Z){ zScale=MIN_Z; zX=0; zY=0; applyTransform(); }
+        }
+        lastTap = now;
+    });
+    wrapper.addEventListener('dblclick', function(e){
+        var r  = wrapper.getBoundingClientRect();
+        zoomAt(e.clientX - r.left, e.clientY - r.top, zScale > 1.5 ? 0 : 2);
+        if(zScale < MIN_Z){ zScale=MIN_Z; zX=0; zY=0; applyTransform(); }
+    });
+
+    /* ── RESET BUTTON ────────────────────────────────────────────── */
+    resetBtn.addEventListener('click', function(){
+        zScale=1; zX=0; zY=0; applyTransform();
+    });
+    resetBtn.addEventListener('touchend', function(e){
+        e.stopPropagation();
+        zScale=1; zX=0; zY=0; applyTransform();
+    });
+
+    applyTransform();
+})();
+
 </script>
 </body>
 </html>
