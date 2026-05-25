@@ -1,0 +1,452 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+    <title>Radar Vektor Jombang</title>
+    <style>
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+        :root {
+            --bg-deep: #070b14; --bg-card: #1e293b;
+            --green: #00ff88; --blue: #38bdf8;
+            --amber: #f59e0b; --red: #ef4444;
+            --muted: #64748b; --border: #1e293b;
+        }
+        html, body {
+            width: 100%; background: var(--bg-deep); color: #e2e8f0;
+            font-family: 'Courier New', Courier, monospace;
+            display: flex; flex-direction: column; align-items: center;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+        }
+        h1 {
+            margin: 14px 0 6px;
+            font-size: clamp(13px, 2.2vw, 20px);
+            color: var(--green); letter-spacing: .07em;
+            text-align: center;
+            text-shadow: 0 0 10px rgba(0,255,136,0.35);
+        }
+        #status-panel {
+            margin: 0 auto 10px; padding: 9px 14px;
+            background: var(--bg-card); border-radius: 8px;
+            border: 1px solid var(--border);
+            width: min(760px, 96vw);
+            font-size: clamp(10px, 1.4vw, 12px); line-height: 1.7;
+        }
+        #loading-status { color: var(--green); font-weight: bold; }
+        .dr { color: var(--blue); font-weight: bold; }
+        #mode-badge {
+            display: inline-block; margin-left: 8px;
+            padding: 1px 7px; border-radius: 4px;
+            font-size: 10px; font-weight: bold; letter-spacing: .05em;
+            background: rgba(56,189,248,0.15); color: var(--blue);
+            border: 1px solid rgba(56,189,248,0.3);
+            vertical-align: middle;
+        }
+        .canvas-wrapper { width: min(800px, 98vw); aspect-ratio: 800/700; }
+        canvas {
+            display: block; width: 100%; height: 100%;
+            border: 2px solid var(--border); border-radius: 10px;
+            background: #090d16;
+            -webkit-transform: translateZ(0); transform: translateZ(0);
+            will-change: transform;
+        }
+        #legend {
+            display: flex; gap: 12px; flex-wrap: wrap;
+            justify-content: center; margin: 8px 0 14px;
+            font-size: clamp(9px, 1.2vw, 11px); color: var(--muted);
+        }
+        .li { display: flex; align-items: center; gap: 4px; }
+        .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+    </style>
+</head>
+<body>
+<h1>⬡ RADAR VEKTOR JOMBANG — TERJEMAHAN DATA AKTUAL</h1>
+<div id="status-panel">
+    <div id="loading-status">🟢 INTERPOLASI SISTEM AKTIF <span id="mode-badge">DETEKSI...</span></div>
+    <div id="data-display">Membaca data atmosfer...</div>
+</div>
+<div class="canvas-wrapper">
+    <canvas id="canvasJombang" width="800" height="700"></canvas>
+</div>
+<div id="legend">
+    <div class="li"><span class="dot" style="background:#f59e0b"></span>Kec. Utara</div>
+    <div class="li"><span class="dot" style="background:#38bdf8"></span>Kec. Tengah</div>
+    <div class="li"><span class="dot" style="background:#ef4444"></span>Kec. Selatan</div>
+    <div class="li"><span class="dot" style="background:rgba(0,150,255,.7)"></span>Hujan Tinggi</div>
+    <div class="li"><span class="dot" style="background:rgba(0,255,136,.5)"></span>Mendung</div>
+</div>
+
+<script>
+(function () {
+'use strict';
+
+/* ════════════════════════════════════════════════════════════════════
+   ADAPTIVE ENGINE DETECTOR
+   Benchmark kecepatan fillRect saat init untuk auto-pilih render mode.
+   Hasil: 'HQ'  = PC / browser modern  → fillRect + shadowBlur
+          'LQ'  = Android lama / WebView → ImageData + no shadow
+   ════════════════════════════════════════════════════════════════════ */
+var MODE = (function detectMode() {
+    /* Ukur berapa lama 10.000 fillRect di canvas kecil */
+    var tc = document.createElement('canvas');
+    tc.width = 200; tc.height = 200;
+    var tx = tc.getContext('2d');
+    var t0 = Date.now();
+    for (var i = 0; i < 10000; i++) {
+        tx.fillStyle = i % 2 ? 'rgba(0,150,255,0.3)' : 'rgba(0,255,136,0.1)';
+        tx.fillRect((i * 7) % 195, (i * 3) % 195, 5, 5);
+    }
+    var elapsed = Date.now() - t0;
+
+    /* Threshold tambahan: touch device atau layar sempit → prefer LQ */
+    var isTouch   = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0);
+    var isNarrow  = window.innerWidth < 600;
+    var isSlowGPU = elapsed > 30;   /* >30ms untuk 10k fillRect = GPU lemah */
+
+    /* Juga cek UA kasar untuk Android WebView / browser bawaan */
+    var ua = navigator.userAgent || '';
+    var isAndroidBrowser = /Android/i.test(ua) && !/Chrome\/[5-9][0-9]/i.test(ua);
+
+    var badge = document.getElementById('mode-badge');
+    if (isSlowGPU || isAndroidBrowser || (isTouch && isNarrow)) {
+        badge.textContent = 'MODE LQ · MOBILE';
+        badge.style.background = 'rgba(245,158,11,0.15)';
+        badge.style.color = '#f59e0b';
+        badge.style.borderColor = 'rgba(245,158,11,0.3)';
+        return 'LQ';
+    }
+    badge.textContent = 'MODE HQ · DESKTOP';
+    return 'HQ';
+})();
+
+/* ════════════════════════════════════════════════════════════════════
+   KONSTANTA & CANVAS
+   ════════════════════════════════════════════════════════════════════ */
+var PI  = 3.1415926535897932384626433832795028841971693993751058209;
+var TAU = PI * 2;
+var Ku  = 1.25;
+var LW  = 800, LH = 700;
+
+/* DPR: HQ bebas, LQ di-cap 1.5 */
+var dpr = MODE === 'HQ'
+    ? (window.devicePixelRatio || 1)
+    : Math.min(window.devicePixelRatio || 1, 1.5);
+
+var canvas = document.getElementById('canvasJombang');
+/* alpha:false di LQ = lebih cepat composite, HQ butuh alpha untuk shadow */
+var ctx = canvas.getContext('2d', { alpha: MODE === 'HQ' });
+canvas.width  = Math.round(LW * dpr);
+canvas.height = Math.round(LH * dpr);
+ctx.scale(dpr, dpr);
+
+/* ════════════════════════════════════════════════════════════════════
+   STATE
+   ════════════════════════════════════════════════════════════════════ */
+var sat = { kelembapan:75, angin:12, P:1010, deltaT:8, m:6000000, kecAnim:0.004 };
+var T   = 0;
+var fid = null;
+
+/* ════════════════════════════════════════════════════════════════════
+   DATA WILAYAH
+   ════════════════════════════════════════════════════════════════════ */
+var batas = [
+    {x:200,y:120},{x:450,y:80},{x:680,y:110},
+    {x:720,y:230},{x:680,y:400},{x:730,y:620},
+    {x:550,y:660},{x:380,y:650},{x:220,y:560},
+    {x:100,y:450},{x:180,y:300},{x:150,y:180}
+];
+var kec = [
+    {n:"Plandaan",         x:220,y:180,t:"U",bL:0.90,bA:1.15},
+    {n:"Ploso",            x:380,y:190,t:"U",bL:0.88,bA:1.25},
+    {n:"Kudu",             x:550,y:170,t:"U",bL:0.91,bA:1.10},
+    {n:"Kabuh",            x:450,y:120,t:"U",bL:0.85,bA:1.30},
+    {n:"Ngusikan",         x:650,y:130,t:"U",bL:0.89,bA:1.20},
+    {n:"Tembelang",        x:390,y:290,t:"M",bL:0.98,bA:1.00},
+    {n:"Megaluh",          x:250,y:300,t:"M",bL:0.97,bA:1.05},
+    {n:"Jombang Kota",     x:410,y:390,t:"M",bL:1.00,bA:0.95},
+    {n:"Peterongan",       x:510,y:380,t:"M",bL:1.01,bA:0.95},
+    {n:"Kesamben",         x:650,y:250,t:"M",bL:0.95,bA:1.05},
+    {n:"Sumobito",         x:660,y:350,t:"M",bL:0.99,bA:1.00},
+    {n:"Jogoroto",         x:490,y:460,t:"M",bL:1.02,bA:0.90},
+    {n:"Perak",            x:240,y:450,t:"M",bL:0.96,bA:1.00},
+    {n:"Bandarkedungmulyo",x:140,y:440,t:"M",bL:0.95,bA:1.10},
+    {n:"Gudo",             x:250,y:550,t:"S",bL:1.05,bA:0.90},
+    {n:"Diwek",            x:380,y:490,t:"S",bL:1.04,bA:0.85},
+    {n:"Mojoagung",        x:630,y:460,t:"S",bL:1.08,bA:0.95},
+    {n:"Mojowarno",        x:550,y:540,t:"S",bL:1.10,bA:0.80},
+    {n:"Bareng",           x:560,y:610,t:"S",bL:1.15,bA:0.75},
+    {n:"Wonosalam",        x:680,y:610,t:"S",bL:1.25,bA:0.70},
+    {n:"Ngoro",            x:410,y:600,t:"S",bL:1.06,bA:0.85}
+];
+
+/* ════════════════════════════════════════════════════════════════════
+   HELPER
+   ════════════════════════════════════════════════════════════════════ */
+function artiL(p){ return p>=85?'Hujan':p>=70?'Mendung':p>=55?'Berawan':'Cerah'; }
+function artiA(v){ return v>=20?'Kencang':v>=10?'Sedang':'Tenang'; }
+function setBatasPath(c){
+    c.beginPath(); c.moveTo(batas[0].x,batas[0].y);
+    for(var i=1;i<batas.length;i++) c.lineTo(batas[i].x,batas[i].y);
+    c.closePath();
+}
+
+/* ════════════════════════════════════════════════════════════════════
+   OFFSCREEN BASE (sama untuk kedua mode)
+   ════════════════════════════════════════════════════════════════════ */
+var ocBase = document.createElement('canvas');
+var ocBaseCtx;
+function buildBase(){
+    ocBase.width  = canvas.width;
+    ocBase.height = canvas.height;
+    ocBaseCtx = ocBase.getContext('2d', {alpha: false});
+    ocBaseCtx.fillStyle = '#090d16';
+    ocBaseCtx.fillRect(0, 0, ocBase.width, ocBase.height);
+    ocBaseCtx.scale(dpr, dpr);
+    setBatasPath(ocBaseCtx);
+    ocBaseCtx.fillStyle='#111827'; ocBaseCtx.fill();
+    ocBaseCtx.strokeStyle='#1e293b'; ocBaseCtx.lineWidth=3; ocBaseCtx.stroke();
+}
+
+/* ════════════════════════════════════════════════════════════════════
+   MODE HQ — offscreen fillRect (kualitas penuh, PC / Chrome modern)
+   ════════════════════════════════════════════════════════════════════ */
+var ocHQ, ocHQCtx;
+function initHQ(){
+    ocHQ = document.createElement('canvas');
+    ocHQ.width  = LW; ocHQ.height = LH;
+    ocHQCtx = ocHQ.getContext('2d');
+}
+function renderGridHQ(){
+    ocHQCtx.clearRect(0, 0, LW, LH);
+    var mdt=sat.m*sat.deltaT, P=sat.P;
+    var skala=(sat.m/10000000)*PI;
+    var f1=0.002*skala, f2=0.005*skala;
+    var grid=5;
+    for(var y=0;y<LH;y+=grid){
+        for(var x=0;x<LW;x+=grid){
+            var v = Math.sin(x*f1+T)*Math.cos(y*f1+T);
+            v += Math.sin(x*f2-T)*Math.cos(y*f2+T)*0.5;
+            var nv  = (v+1.5)/3;
+            var aef = 2500*(1.5-nv);
+            var ih  = Ku*(mdt/(P*aef));
+            if(ih>1.4){
+                ocHQCtx.fillStyle='rgba(0,150,255,0.35)';
+                ocHQCtx.fillRect(x,y,grid,grid);
+            } else if(ih>0.95){
+                ocHQCtx.fillStyle='rgba(0,255,136,0.15)';
+                ocHQCtx.fillRect(x,y,grid,grid);
+            }
+        }
+    }
+}
+
+/* ════════════════════════════════════════════════════════════════════
+   MODE LQ — ImageData pixel buffer (Android / browser lama)
+   ════════════════════════════════════════════════════════════════════ */
+var GRID_SCALE=2, GW, GH, ocLQ, ocLQCtx, imgData, imgBuf, maskBuf;
+var noiseF1, noiseF2;
+var GRID_EVERY=3, frameCount=0;
+
+function updateNoiseConsts(){
+    var skala=(sat.m/10000000)*PI;
+    noiseF1=0.002*skala/GRID_SCALE;
+    noiseF2=0.005*skala/GRID_SCALE;
+}
+function initLQ(){
+    GW=Math.round(LW/GRID_SCALE);
+    GH=Math.round(LH/GRID_SCALE);
+    ocLQ=document.createElement('canvas');
+    ocLQ.width=GW; ocLQ.height=GH;
+    ocLQCtx=ocLQ.getContext('2d',{alpha:true});
+    imgData=ocLQCtx.createImageData(GW,GH);
+    imgBuf=imgData.data;
+
+    /* Precompute mask wilayah (ray-casting) */
+    maskBuf=new Uint8Array(GW*GH);
+    var px=[],py=[];
+    for(var i=0;i<batas.length;i++){
+        px.push(batas[i].x/GRID_SCALE);
+        py.push(batas[i].y/GRID_SCALE);
+    }
+    var n=px.length;
+    for(var y=0;y<GH;y++){
+        for(var x=0;x<GW;x++){
+            var inside=false,j=n-1;
+            for(var ii=0;ii<n;j=ii++){
+                var xi=px[ii],yi=py[ii],xj=px[j],yj=py[j];
+                if(((yi>y)!==(yj>y))&&(x<(xj-xi)*(y-yi)/(yj-yi)+xi)) inside=!inside;
+            }
+            maskBuf[y*GW+x]=inside?1:0;
+        }
+    }
+    updateNoiseConsts();
+}
+function renderGridLQ(){
+    var mdt=sat.m*sat.deltaT, P=sat.P, idx=0;
+    for(var y=0;y<GH;y++){
+        for(var x=0;x<GW;x++){
+            if(!maskBuf[idx]){
+                imgBuf[idx*4]=0;imgBuf[idx*4+1]=0;
+                imgBuf[idx*4+2]=0;imgBuf[idx*4+3]=0;
+                idx++;continue;
+            }
+            var v=Math.sin(x*noiseF1+T)*Math.cos(y*noiseF1+T);
+            v+=Math.sin(x*noiseF2-T)*Math.cos(y*noiseF2+T)*0.5;
+            var nv=(v+1.5)/3, aef=2500*(1.5-nv), ih=Ku*(mdt/(P*aef));
+            if(ih>1.4){
+                imgBuf[idx*4]=0;imgBuf[idx*4+1]=150;imgBuf[idx*4+2]=255;imgBuf[idx*4+3]=90;
+            } else if(ih>0.95){
+                imgBuf[idx*4]=0;imgBuf[idx*4+1]=255;imgBuf[idx*4+2]=136;imgBuf[idx*4+3]=38;
+            } else {
+                imgBuf[idx*4]=0;imgBuf[idx*4+1]=0;imgBuf[idx*4+2]=0;imgBuf[idx*4+3]=0;
+            }
+            idx++;
+        }
+    }
+    ocLQCtx.putImageData(imgData,0,0);
+}
+
+/* ════════════════════════════════════════════════════════════════════
+   NODE RENDERER — HQ pakai shadowBlur, LQ pakai ring manual
+   ════════════════════════════════════════════════════════════════════ */
+var ringAlpha = { '#f59e0b':'rgba(245,158,11,0.3)', '#ef4444':'rgba(239,68,68,0.3)', '#38bdf8':'rgba(56,189,248,0.3)' };
+
+function renderNodes(){
+    ctx.textAlign='center';
+    for(var k=0;k<kec.length;k++){
+        var d    = kec[k];
+        var lPct = Math.min(100, Math.round(sat.kelembapan*d.bL));
+        var aKmh = Math.round(sat.angin*d.bA*10)/10;
+        var col  = d.t==='U'?'#f59e0b':d.t==='S'?'#ef4444':'#38bdf8';
+
+        if(MODE==='HQ'){
+            /* Glow via shadowBlur — mahal tapi cantik di PC */
+            ctx.beginPath();
+            ctx.arc(d.x,d.y,4,0,TAU);
+            ctx.fillStyle=col;
+            ctx.shadowColor=col; ctx.shadowBlur=8;
+            ctx.fill();
+            ctx.shadowBlur=0;
+        } else {
+            /* Ring manual tanpa shadow — ringan di mobile */
+            ctx.beginPath();
+            ctx.arc(d.x,d.y,7,0,TAU);
+            ctx.strokeStyle=ringAlpha[col]||'rgba(56,189,248,0.3)';
+            ctx.lineWidth=3; ctx.stroke();
+            ctx.beginPath();
+            ctx.arc(d.x,d.y,4,0,TAU);
+            ctx.fillStyle=col; ctx.fill();
+        }
+
+        ctx.fillStyle='#ffffff';
+        ctx.font='bold 10px monospace';
+        ctx.fillText(d.n, d.x, d.y-26);
+
+        ctx.fillStyle='#a7f3d0';
+        ctx.font='9px monospace';
+        ctx.fillText('H:'+lPct+'% ('+artiL(lPct)+')', d.x, d.y-14);
+
+        ctx.fillStyle='#bae6fd';
+        ctx.font='9px monospace';
+        ctx.fillText('W:'+aKmh+'k ('+artiA(aKmh)+')', d.x, d.y-4);
+    }
+}
+
+/* ════════════════════════════════════════════════════════════════════
+   RENDER LOOP UTAMA — cabang per mode
+   ════════════════════════════════════════════════════════════════════ */
+function render(){
+    ctx.drawImage(ocBase, 0, 0, LW, LH);
+
+    if(MODE==='HQ'){
+        /* HQ: clip wilayah → render fillRect → restore */
+        ctx.save();
+        setBatasPath(ctx); ctx.clip();
+        renderGridHQ();
+        ctx.drawImage(ocHQ, 0, 0, LW, LH);
+        ctx.restore();
+    } else {
+        /* LQ: throttle grid, blit scale 2× tanpa clip (mask sudah handle) */
+        if(frameCount % GRID_EVERY === 0) renderGridLQ();
+        frameCount++;
+        ctx.drawImage(ocLQ, 0, 0, LW, LH);
+    }
+
+    renderNodes();
+    T += sat.kecAnim;
+    fid = requestAnimationFrame(render);
+}
+
+/* ════════════════════════════════════════════════════════════════════
+   FETCH DATA CUACA
+   ════════════════════════════════════════════════════════════════════ */
+function sync(){
+    var xhr=new XMLHttpRequest();
+    xhr.open('GET','https://api.open-meteo.com/v1/forecast'
+        +'?latitude=-7.5568&longitude=112.2331'
+        +'&current=temperature_2m,relative_humidity_2m,surface_pressure,wind_speed_10m',true);
+    xhr.timeout=10000;
+    xhr.onload=function(){
+        if(xhr.status>=200&&xhr.status<300){
+            try{
+                var c=JSON.parse(xhr.responseText).current;
+                sat.P=c.surface_pressure;
+                sat.kelembapan=c.relative_humidity_2m;
+                sat.angin=c.wind_speed_10m;
+                sat.m=sat.kelembapan*95000;
+                sat.deltaT=Math.max(4,c.temperature_2m-((100-sat.kelembapan)/5));
+                sat.kecAnim=Math.min(0.012,Math.max(0.002,sat.angin*0.0005));
+                if(MODE==='LQ') updateNoiseConsts();
+                document.getElementById('data-display').innerHTML=
+                    'Satelit &rarr; Kelembapan: <span class="dr">'+sat.kelembapan+'%</span>'
+                    +' | Angin: <span class="dr">'+sat.angin+' km/jam</span>';
+            }catch(e){fail();}
+        }else{fail();}
+    };
+    xhr.onerror=xhr.ontimeout=fail;
+    xhr.send();
+}
+function fail(){ document.getElementById('data-display').innerText='Timeout. Estimasi lokal aktif.'; }
+
+/* ════════════════════════════════════════════════════════════════════
+   VISIBILITY PAUSE
+   ════════════════════════════════════════════════════════════════════ */
+var visKey=typeof document.hidden!=='undefined'?'visibilitychange'
+          :typeof document.webkitHidden!=='undefined'?'webkitvisibilitychange':null;
+if(visKey) document.addEventListener(visKey,function(){
+    var hidden=document.hidden||document.webkitHidden;
+    if(hidden){if(fid){cancelAnimationFrame(fid);fid=null;}}
+    else{if(!fid)fid=requestAnimationFrame(render);}
+},false);
+
+/* ════════════════════════════════════════════════════════════════════
+   RESIZE
+   ════════════════════════════════════════════════════════════════════ */
+var rsT=null;
+window.addEventListener('resize',function(){
+    clearTimeout(rsT);
+    rsT=setTimeout(function(){
+        dpr=MODE==='HQ'
+            ?(window.devicePixelRatio||1)
+            :Math.min(window.devicePixelRatio||1,1.5);
+        canvas.width=Math.round(LW*dpr);
+        canvas.height=Math.round(LH*dpr);
+        ctx.scale(dpr,dpr);
+        buildBase();
+    },250);
+},false);
+
+/* ════════════════════════════════════════════════════════════════════
+   INIT
+   ════════════════════════════════════════════════════════════════════ */
+buildBase();
+if(MODE==='HQ') initHQ(); else initLQ();
+sync();
+setInterval(sync,600000);
+render();
+
+})();
+</script>
+</body>
+</html>
